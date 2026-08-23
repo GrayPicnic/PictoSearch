@@ -94,6 +94,8 @@
   .icon-card:hover img { transform: scale(1.1); }
   .icon-name { font-size: 11.5px; font-weight: 600; color: var(--color-text-title); line-height: 1.4; height: 2.8em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; margin-bottom: 4px; }
   .icon-set { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--color-text-muted); }
+  .icon-license { display: inline-block; margin-top: 2px; font-size: 9.5px; font-weight: 600; color: var(--color-text-muted); text-decoration: none; border: 1px solid var(--color-border-light); border-radius: 4px; padding: 1px 5px; }
+  .icon-license:hover { color: var(--color-primary); border-color: currentColor; }
   .card-actions { display: flex; gap: 6px; margin-top: 14px; opacity: 0.9; transition: var(--transition-smooth); }
   @media (min-width: 769px) {
     .card-actions { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(255, 255, 255, 0.95); padding: 12px; margin-top: 0; transform: translateY(100%); opacity: 0; border-top: 1px solid var(--color-border-light); }
@@ -268,6 +270,7 @@ const I18N = {
     dlSuccess: (name, fmt) => `${name}.${fmt} 다운로드 완료`,
     dlFail: (name, fmt) => `${name} ${fmt.toUpperCase()} 다운로드 실패`,
     cardAria: name => `${name} 아이콘`,
+    licenseAria: title => `라이선스: ${title}. 공식 라이선스 페이지로 이동합니다.`,
     kofi: '제작자에게 후원 : Ko-fi',
   },
   en: {
@@ -306,6 +309,7 @@ const I18N = {
     dlSuccess: (name, fmt) => `Downloaded ${name}.${fmt}`,
     dlFail: (name, fmt) => `Failed to download ${name} ${fmt.toUpperCase()}`,
     cardAria: name => `${name} icon`,
+    licenseAria: title => `License: ${title}. Opens the official license page.`,
     kofi: 'Support the Creator : Ko-fi',
   }
 };
@@ -470,7 +474,29 @@ async function handleDownload(btn, svgUrl, name, format) {
   }
 }
 
-function makeCard(name, svgUrl, setLabel) {
+// One-time fetch of Iconify's full collections directory, keyed by prefix.
+// Each entry carries { license: { title, spdx, url } } for that icon set.
+// Cached in memory for the page's lifetime so repeated searches don't re-fetch it.
+let collectionsIndexPromise = null;
+function getCollectionsIndex() {
+  if (!collectionsIndexPromise) {
+    collectionsIndexPromise = fetch('https://api.iconify.design/collections')
+      .then(res => res.ok ? res.json() : {})
+      .catch(() => ({}));
+  }
+  return collectionsIndexPromise;
+}
+
+async function getIconifyLicense(prefix) {
+  const idx = await getCollectionsIndex();
+  const entry = idx[prefix];
+  if (!entry || !entry.license) return null;
+  return { title: entry.license.title || entry.license.spdx || 'License', url: entry.license.url || null };
+}
+
+const FA_LICENSE = { title: 'CC BY 4.0', url: 'https://fontawesome.com/license/free' };
+
+function makeCard(name, svgUrl, setLabel, licensePromise) {
   const card = document.createElement('div');
   card.className = 'icon-card';
   card.setAttribute('aria-label', t('cardAria', name));
@@ -478,6 +504,7 @@ function makeCard(name, svgUrl, setLabel) {
     <img src="${svgUrl}" loading="lazy" alt="" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><rect width=%2224%22 height=%2224%22 rx=%224%22 fill=%22%23e5edf5%22/></svg>'; this.dataset.broken='1';" />
     <div class="icon-name" title="${name}">${name}</div>
     <div class="icon-set">${setLabel}</div>
+    <div class="icon-license-slot"></div>
     <div class="card-actions">
       <button type="button" class="dl-btn" data-format="svg">${t('dlSvg')}</button>
       <button type="button" class="dl-btn" data-format="png">${t('dlPng')}</button>
@@ -486,6 +513,18 @@ function makeCard(name, svgUrl, setLabel) {
   card.querySelectorAll('.dl-btn').forEach(btn => {
     btn.addEventListener('click', () => handleDownload(btn, svgUrl, name, btn.dataset.format));
   });
+  if (licensePromise) {
+    licensePromise.then(lic => {
+      if (!lic) return;
+      const slot = card.querySelector('.icon-license-slot');
+      if (!slot) return;
+      if (lic.url) {
+        slot.innerHTML = `<a class="icon-license" href="${lic.url}" target="_blank" rel="noopener" title="${t('licenseAria', lic.title)}">${lic.title}</a>`;
+      } else {
+        slot.innerHTML = `<span class="icon-license">${lic.title}</span>`;
+      }
+    }).catch(() => {});
+  }
   return card;
 }
 
@@ -538,7 +577,7 @@ async function searchFA(query, token) {
     grid.innerHTML = '';
     matches.forEach(([name, label, style]) => {
       const svgUrl = `https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@${FA_VERSION}/svgs/${style}/${name}.svg`;
-      grid.appendChild(makeCard(name, svgUrl, `fa-${style}`));
+      grid.appendChild(makeCard(name, svgUrl, `fa-${style}`, Promise.resolve(FA_LICENSE)));
     });
   } catch (e) {
     if (token !== currentSearchToken) return;
@@ -604,7 +643,7 @@ async function search(rawInput) {
       icons.forEach(full => {
         const [prefix, name] = full.split(':');
         const svgUrl = `https://api.iconify.design/${prefix}/${name}.svg`;
-        grid.appendChild(makeCard(name, svgUrl, prefix));
+        grid.appendChild(makeCard(name, svgUrl, prefix, getIconifyLicense(prefix)));
       });
     }
     updateCombinedCount();
