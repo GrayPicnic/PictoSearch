@@ -499,12 +499,12 @@ async function getIconifyLicense(prefix) {
 
 const FA_LICENSE = { title: 'CC BY 4.0', url: 'https://fontawesome.com/license/free' };
 
-function makeCard(name, svgUrl, setLabel, licensePromise) {
+function makeCard(name, svgUrl, setLabel, licensePromise, iconKey) {
   const card = document.createElement('div');
   card.className = 'icon-card';
   card.setAttribute('aria-label', t('cardAria', name));
   card.innerHTML = `
-    <img loading="lazy" alt="" />
+    <img loading="lazy" alt="" ${iconKey ? `data-icon-key="${iconKey}"` : ''} />
     <div class="icon-name" title="${name}">${name}</div>
     <div class="icon-set">${setLabel}</div>
     <div class="icon-license-slot"></div>
@@ -513,7 +513,10 @@ function makeCard(name, svgUrl, setLabel, licensePromise) {
       <button type="button" class="dl-btn" data-format="png">${t('dlPng')}</button>
     </div>
   `;
-  loadIconImg(card.querySelector('img'), svgUrl);
+  // Font Awesome cards (no iconKey) load individually — that CDN hasn't shown
+  // rate-limit trouble. Iconify cards (iconKey set) are filled in by
+  // loadIconifyBatch() below, one request per icon *set* instead of per icon.
+  if (!iconKey) loadIconImg(card.querySelector('img'), svgUrl);
   card.querySelectorAll('.dl-btn').forEach(btn => {
     btn.addEventListener('click', () => handleDownload(btn, svgUrl, name, btn.dataset.format));
   });
@@ -536,6 +539,9 @@ const BROKEN_ICON_PLACEHOLDER = 'data:image/svg+xml;utf8,<svg xmlns="http://www.
 
 // A single failed request is often just a transient network blip, not a
 // genuinely missing icon — retry twice (0.5s, then 1s) before giving up.
+// Used for Font Awesome cards, which load individually; Iconify cards go
+// through loadIconifyBatch() instead (see below) to avoid firing one
+// request per icon in the first place.
 function loadIconImg(img, svgUrl, attempt = 0) {
   const RETRY_DELAYS = [500, 1000];
   img.onerror = () => {
@@ -547,9 +553,61 @@ function loadIconImg(img, svgUrl, attempt = 0) {
       img.dataset.broken = '1';
     }
   };
-  // Cache-bust retries so a failed request isn't just replayed from a
-  // negative cache entry the browser may be holding for the bare URL.
   img.src = attempt === 0 ? svgUrl : `${svgUrl}${svgUrl.includes('?') ? '&' : '?'}retry=${attempt}`;
+}
+
+// Iconify's search results (up to 60 icons) used to fire one <img> request
+// per icon straight at api.iconify.design — a burst that trips the API's
+// rate limit (429) on any search returning many results. Iconify's own
+// bulk endpoint (`/{prefix}.json?icons=a,b,c`) returns every icon in a
+// given set in one response, so this groups the result set by prefix and
+// makes one request per *set* instead of per icon (60 icons is usually
+// only 10-15 distinct sets).
+async function loadIconifyBatch(icons, grid, attempt = 0) {
+  const byPrefix = new Map();
+  icons.forEach(full => {
+    const [prefix, name] = full.split(':');
+    if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
+    byPrefix.get(prefix).push(name);
+  });
+
+  const failedPrefixes = [];
+  await Promise.all([...byPrefix.entries()].map(async ([prefix, names]) => {
+    try {
+      const res = await fetch(`https://api.iconify.design/${prefix}.json?icons=${names.map(encodeURIComponent).join(',')}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const defaultW = data.width || 16, defaultH = data.height || 16;
+      names.forEach(name => {
+        const icon = data.icons && data.icons[name];
+        const img = grid.querySelector(`img[data-icon-key="${prefix}:${name}"]`);
+        if (!img) return;
+        if (!icon) { img.src = BROKEN_ICON_PLACEHOLDER; img.dataset.broken = '1'; return; }
+        const w = icon.width || defaultW, h = icon.height || defaultH;
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}">${icon.body}</svg>`;
+        img.src = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+      });
+    } catch (e) {
+      failedPrefixes.push(prefix);
+    }
+  }));
+
+  if (failedPrefixes.length === 0) return;
+  if (attempt === 0) {
+    // One retry after a few seconds — by now the burst is down to a
+    // handful of set-level requests, well clear of the rate limit that
+    // caused the original per-icon flood.
+    setTimeout(() => {
+      const retryIcons = icons.filter(full => failedPrefixes.includes(full.split(':')[0]));
+      loadIconifyBatch(retryIcons, grid, 1);
+    }, 3000);
+  } else {
+    icons.forEach(full => {
+      if (!failedPrefixes.includes(full.split(':')[0])) return;
+      const img = grid.querySelector(`img[data-icon-key="${full}"]`);
+      if (img) { img.src = BROKEN_ICON_PLACEHOLDER; img.dataset.broken = '1'; }
+    });
+  }
 }
 
 function emptyState(grid, message) {
@@ -667,8 +725,9 @@ async function search(rawInput) {
       icons.forEach(full => {
         const [prefix, name] = full.split(':');
         const svgUrl = `https://api.iconify.design/${prefix}/${name}.svg`;
-        grid.appendChild(makeCard(name, svgUrl, prefix, getIconifyLicense(prefix)));
+        grid.appendChild(makeCard(name, svgUrl, prefix, getIconifyLicense(prefix), full));
       });
+      loadIconifyBatch(icons, grid);
     }
     updateCombinedCount();
   } catch (e) {
