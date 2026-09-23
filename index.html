@@ -504,7 +504,7 @@ function makeCard(name, svgUrl, setLabel, licensePromise) {
   card.className = 'icon-card';
   card.setAttribute('aria-label', t('cardAria', name));
   card.innerHTML = `
-    <img src="${svgUrl}" loading="lazy" alt="" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><rect width=%2224%22 height=%2224%22 rx=%224%22 fill=%22%23e5edf5%22/></svg>'; this.dataset.broken='1';" />
+    <img loading="lazy" alt="" />
     <div class="icon-name" title="${name}">${name}</div>
     <div class="icon-set">${setLabel}</div>
     <div class="icon-license-slot"></div>
@@ -513,6 +513,7 @@ function makeCard(name, svgUrl, setLabel, licensePromise) {
       <button type="button" class="dl-btn" data-format="png">${t('dlPng')}</button>
     </div>
   `;
+  loadIconImg(card.querySelector('img'), svgUrl);
   card.querySelectorAll('.dl-btn').forEach(btn => {
     btn.addEventListener('click', () => handleDownload(btn, svgUrl, name, btn.dataset.format));
   });
@@ -529,6 +530,26 @@ function makeCard(name, svgUrl, setLabel, licensePromise) {
     }).catch(() => {});
   }
   return card;
+}
+
+const BROKEN_ICON_PLACEHOLDER = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="4" fill="%23e5edf5"/></svg>';
+
+// A single failed request is often just a transient network blip, not a
+// genuinely missing icon — retry twice (0.5s, then 1s) before giving up.
+function loadIconImg(img, svgUrl, attempt = 0) {
+  const RETRY_DELAYS = [500, 1000];
+  img.onerror = () => {
+    if (attempt < RETRY_DELAYS.length) {
+      setTimeout(() => loadIconImg(img, svgUrl, attempt + 1), RETRY_DELAYS[attempt]);
+    } else {
+      img.onerror = null;
+      img.src = BROKEN_ICON_PLACEHOLDER;
+      img.dataset.broken = '1';
+    }
+  };
+  // Cache-bust retries so a failed request isn't just replayed from a
+  // negative cache entry the browser may be holding for the bare URL.
+  img.src = attempt === 0 ? svgUrl : `${svgUrl}${svgUrl.includes('?') ? '&' : '?'}retry=${attempt}`;
 }
 
 function emptyState(grid, message) {
